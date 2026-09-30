@@ -1,0 +1,122 @@
+name: terraform
+
+# Format, validation, tests (fournisseurs simulés), shellcheck et gitleaks à chaque push et PR. Le plan (PR et main) et l'apply
+# (main, environnement GitHub « staging ») s'activent quand bootstrap/ est appliqué et que les
+# variables du dépôt sont posées : AWS_REGION, TF_STATE_BUCKET, AWS_TERRAFORM_PLAN_ROLE_ARN,
+# AWS_TERRAFORM_APPLY_ROLE_ARN, MAIL_FROM_ADDRESS (et MAIL_DOMAIN, ROUTE53_ZONE_ID en option).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TERRAFORM_VERSION: 1.16.4
+  # terraform_1.16.4_linux_amd64.zip (releases.hashicorp.com, fichier SHA256SUMS).
+  TERRAFORM_SHA256: dc94af0eef1147718ad7c8daea792ed199e3e0492eec180d0adafa2a65a879df
+  TF_IN_AUTOMATION: '1'
+  TF_INPUT: '0'
+  CHECKPOINT_DISABLE: '1'
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install Terraform
+        run: &install-terraform |
+          curl -fsSLo terraform.zip "https://releases.hashicorp.com/terraform/${TERRAFORM_VERSION}/terraform_${TERRAFORM_VERSION}_linux_amd64.zip"
+          echo "${TERRAFORM_SHA256}  terraform.zip" | sha256sum --check
+          sudo unzip -o -q terraform.zip terraform -d /usr/local/bin
+          rm terraform.zip
+          terraform version
+
+      - name: Format
+        run: terraform fmt -check -recursive -diff
+
+      - name: Validate
+        run: |
+          for root in bootstrap envs/staging; do
+            terraform -chdir="$root" init -backend=false
+            terraform -chdir="$root" validate
+          done
+
+      # Fournisseurs simulés : toute la configuration du staging est évaluée sans compte AWS.
+      - name: Test
+        run: terraform -chdir=envs/staging test
+
+      - name: Shellcheck
+        run: shellcheck scripts/*.sh envs/staging/files/*.sh
+
+  gitleaks:
+    name: gitleaks (full history)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo zricethezav/gitleaks:v8.30.1
+          git /repo --redact --verbose --exit-code 1
+
+  plan:
+    needs: validate
+    if: vars.AWS_TERRAFORM_PLAN_ROLE_ARN != '' && vars.TF_STATE_BUCKET != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env: &staging-vars
+      TF_VAR_region: ${{ vars.AWS_REGION }}
+      TF_VAR_mail_from_address: ${{ vars.MAIL_FROM_ADDRESS }}
+      TF_VAR_mail_domain: ${{ vars.MAIL_DOMAIN }}
+      TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Terraform
+        run: *install-terraform
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Plan
+        working-directory: envs/staging
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          terraform plan -lock=false -no-color
+
+  apply:
+    needs: [validate, gitleaks, plan]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_TERRAFORM_APPLY_ROLE_ARN != '' && vars.TF_STATE_BUCKET != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    # Règles de protection (approbation) réglées sur l'environnement GitHub.
+    environment: staging
+    permissions:
+      contents: read
+      id-token: write
+    env: *staging-vars
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Terraform
+        run: *install-terraform
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.AWS_TERRAFORM_APPLY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Apply
+        working-directory: envs/staging
+        run: |
+          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          terraform apply -auto-approve -no-color

@@ -1,0 +1,98 @@
+# Services de l'instance applicative, rendus par Terraform et lancés par kaxolax-deploy.
+name: kaxolax
+
+x-defaults: &defaults
+  restart: unless-stopped
+  logging:
+    driver: local
+  security_opt:
+    - no-new-privileges:true
+
+# Services Node : aucun privilège, certificats de RDS en lecture seule.
+x-node: &node
+  <<: *defaults
+  cap_drop: [ALL]
+
+services:
+  caddy:
+    <<: *defaults
+    image: ${public_images.caddy}
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    ports:
+      - 80:80
+    env_file: [env/caddy.env]
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      web: { condition: service_healthy }
+      api: { condition: service_healthy }
+      realtime: { condition: service_healthy }
+
+  web:
+    <<: *node
+    image: ${images.web}
+    env_file: [env/web.env]
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/login').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  api:
+    <<: *node
+    image: ${images.api}
+    env_file: [env/api.env]
+    volumes:
+      - ./certs:/certs:ro
+    depends_on:
+      redis: { condition: service_healthy }
+      compile-gateway: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3333/api/v1/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  realtime:
+    <<: *node
+    image: ${images.realtime}
+    env_file: [env/realtime.env]
+    volumes:
+      - ./certs:/certs:ro
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:1234/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  compile-gateway:
+    <<: *node
+    image: ${images["compile-gateway"]}
+    env_file: [env/gateway.env]
+    depends_on:
+      redis: { condition: service_healthy }
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3100/health', { headers: { 'x-internal-token': process.env.INTERNAL_TOKEN } }).then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  redis:
+    <<: *defaults
+    image: ${public_images.redis}
+    command: [redis-server, --appendonly, 'yes']
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  redis-data:

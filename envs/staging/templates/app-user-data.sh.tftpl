@@ -1,0 +1,37 @@
+#!/bin/bash
+# Instance applicative du staging (Amazon Linux 2023, arm64, sans accès à internet).
+# Installe Docker et kaxolax-deploy, qui lit la configuration dans S3 et les secrets dans Secrets
+# Manager à chaque déploiement : ces user data ne contiennent aucun secret.
+set -euo pipefail
+exec > >(tee -a /var/log/kaxolax-user-data.log) 2>&1
+
+# retry <tentatives> <pause> <commande>...
+retry() {
+  local attempts=$1 delay=$2 attempt
+  shift 2
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    "$@" && return 0
+    echo "attempt $attempt/$attempts failed: $*"
+    sleep "$delay"
+  done
+  return 1
+}
+
+# Dépôts dnf d'AL2023 servis par S3 (endpoint passerelle).
+retry 20 15 dnf install -y docker jq
+systemctl enable --now docker
+
+install -d -m 0755 /etc/kaxolax
+cat > /etc/kaxolax/deploy.env <<'KAXOLAX_DEPLOY_ENV'
+REGION=${region}
+CONFIG_URI=${config_uri}
+KAXOLAX_DEPLOY_ENV
+
+cat > /usr/local/bin/kaxolax-deploy <<'KAXOLAX_DEPLOY_SCRIPT'
+${deploy_script}
+KAXOLAX_DEPLOY_SCRIPT
+chmod 0755 /usr/local/bin/kaxolax-deploy
+
+# Premier déploiement : la configuration arrive après CloudFront, les images après la CI.
+retry 60 30 /usr/local/bin/kaxolax-deploy ||
+  echo "kaxolax-deploy failed: the deploy job of the platform CI (SSM) will run it again"

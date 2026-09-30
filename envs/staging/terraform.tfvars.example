@@ -1,0 +1,6 @@
+# Copier en terraform.tfvars (ignoré par git). Aucun secret ici : ils sont générés par Terraform.
+mail_from_address = "no-reply@example.com"
+
+# Avec un domaine géré dans Route 53 : DKIM, et réception des emails des tests Playwright.
+# mail_domain     = "example.com"
+# route53_zone_id = "Z0123456789ABCDEFGHIJ"
