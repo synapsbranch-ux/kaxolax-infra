@@ -68,7 +68,7 @@ navigateur ──HTTPS──▶ CloudFront ──VPC origin (réseau AWS)──�
 
    | Dépôt                    | Variables                                                                                                                                |
    | ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
-   | `kaxolax-platform`       | `AWS_REGION`, `AWS_ECR_PUSH_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`                                                                             |
+   | `kaxolax-platform`       | `AWS_REGION`, `AWS_ECR_PUSH_ROLE_ARN`, `AWS_DEPLOY_ROLE_ARN`, puis `E2E_BASE_URL`, `E2E_MAIL_DOMAIN`, `E2E_MAIL_S3_BUCKET` (sorties du staging) |
    | `kaxolax-texlive-images` | `AWS_REGION`, `AWS_ECR_PUSH_ROLE_ARN`                                                                                                    |
    | `kaxolax-infra`          | `AWS_REGION`, `TF_STATE_BUCKET`, `AWS_TERRAFORM_PLAN_ROLE_ARN`, `AWS_TERRAFORM_APPLY_ROLE_ARN`, `MAIL_FROM_ADDRESS` (`MAIL_DOMAIN`, `ROUTE53_ZONE_ID`) |
 
@@ -96,7 +96,7 @@ navigateur ──HTTPS──▶ CloudFront ──VPC origin (réseau AWS)──�
 
 5. **Déploiement** : les instances lancent `kaxolax-deploy` au démarrage, et le réessaient tant que
    la configuration ou les images manquent. Ensuite, chaque push sur `main` de `kaxolax-platform`
-   pousse les images et déploie par SSM. À la main :
+   pousse les images, déploie par SSM puis lance le parcours Playwright sur le staging. À la main :
 
    ```sh
    aws ssm send-command --document-name AWS-RunShellScript \
@@ -121,7 +121,7 @@ cd ../kaxolax-platform/apps/web
 E2E_BASE_URL="$(terraform -chdir=../../../kaxolax-infra/envs/staging output -raw app_url)" \
 E2E_MAIL_DOMAIN="$(terraform -chdir=../../../kaxolax-infra/envs/staging output -raw e2e_mail_domain)" \
 E2E_MAIL_S3_BUCKET="$(terraform -chdir=../../../kaxolax-infra/envs/staging output -raw e2e_mail_bucket)" \
-  pnpm test:e2e
+  pnpm e2e
 ```
 
 ## Limites connues

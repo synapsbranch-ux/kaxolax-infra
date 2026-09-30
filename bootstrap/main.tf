@@ -111,7 +111,8 @@ resource "aws_iam_role_policy" "ecr_push" {
   policy = data.aws_iam_policy_document.ecr_push.json
 }
 
-# Déploiement : commande SSM sur les instances du projet (docker compose pull && up).
+# Déploiement : commande SSM sur les instances du projet (kaxolax-deploy), puis lecture des emails
+# de test du parcours Playwright.
 data "aws_iam_policy_document" "deploy" {
   statement {
     actions   = ["ssm:SendCommand"]
@@ -129,6 +130,15 @@ data "aws_iam_policy_document" "deploy" {
   statement {
     actions   = ["ssm:GetCommandInvocation", "ssm:ListCommandInvocations", "ec2:DescribeInstances"]
     resources = ["*"]
+  }
+  # Parcours Playwright sur le staging, après le déploiement : emails de test reçus par SES.
+  statement {
+    actions   = ["s3:ListBucket"]
+    resources = ["arn:aws:s3:::kaxolax-*-e2e-mail-${local.account_id}"]
+  }
+  statement {
+    actions   = ["s3:GetObject"]
+    resources = ["arn:aws:s3:::kaxolax-*-e2e-mail-${local.account_id}/inbound/*"]
   }
 }
 
