@@ -1,9 +1,12 @@
 name: terraform
 
-# Format, validation, tests (fournisseurs simulés), shellcheck et gitleaks à chaque push et PR. Le plan (PR et main) et l'apply
-# (main, environnement GitHub « staging ») s'activent quand bootstrap/ est appliqué et que les
-# variables du dépôt sont posées : AWS_REGION, TF_STATE_BUCKET, AWS_TERRAFORM_PLAN_ROLE_ARN,
-# AWS_TERRAFORM_APPLY_ROLE_ARN, MAIL_FROM_ADDRESS (et MAIL_DOMAIN, ROUTE53_ZONE_ID en option).
+# Format, validation, tests (fournisseur simulé), shellcheck et gitleaks à chaque push et PR.
+# L'image de sauvegarde est construite et testée par la CI de kaxolax-platform (scripts/backup). Le plan (PR et main) et l'apply (main, environnement GitHub « production »)
+# s'activent quand l'état R2 et les variables du dépôt sont posés (docs/procedure.md) :
+#   variables : CLOUDFLARE_ACCOUNT_ID, PRODUCTION_DOMAIN, TF_STATE_BUCKET, TF_STATE_ENDPOINT,
+#               TF_RAILWAY_TARGETS (JSON), TF_EXTRA_DNS_RECORDS (JSON), TF_SSL_MODE
+#   secrets   : CLOUDFLARE_API_TOKEN, TF_STATE_ACCESS_KEY_ID, TF_STATE_SECRET_ACCESS_KEY
+# Le dossier legacy/ (AWS, étape 1) n'est plus validé : seul son format est contrôlé.
 
 on:
   push:
@@ -45,17 +48,15 @@ jobs:
 
       - name: Validate
         run: |
-          for root in bootstrap envs/staging; do
-            terraform -chdir="$root" init -backend=false
-            terraform -chdir="$root" validate
-          done
+          terraform -chdir=cloudflare init -backend=false
+          terraform -chdir=cloudflare validate
 
-      # Fournisseurs simulés : toute la configuration du staging est évaluée sans compte AWS.
+      # Fournisseur simulé : toute la configuration est évaluée sans compte Cloudflare.
       - name: Test
-        run: terraform -chdir=envs/staging test
+        run: terraform -chdir=cloudflare test
 
       - name: Shellcheck
-        run: shellcheck scripts/*.sh envs/staging/files/*.sh
+        run: shellcheck -x railway/*.sh
 
   gitleaks:
     name: gitleaks (full history)
@@ -71,52 +72,49 @@ jobs:
 
   plan:
     needs: validate
-    if: vars.AWS_TERRAFORM_PLAN_ROLE_ARN != '' && vars.TF_STATE_BUCKET != ''
+    # Jamais pour une PR venue d'un fork (le jeton de Terraform a des droits d'écriture).
+    if: >-
+      vars.TF_STATE_BUCKET != '' && vars.CLOUDFLARE_ACCOUNT_ID != ''
+      && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    permissions:
-      contents: read
-      id-token: write
-    env: &staging-vars
-      TF_VAR_region: ${{ vars.AWS_REGION }}
-      TF_VAR_mail_from_address: ${{ vars.MAIL_FROM_ADDRESS }}
-      TF_VAR_mail_domain: ${{ vars.MAIL_DOMAIN }}
-      TF_VAR_route53_zone_id: ${{ vars.ROUTE53_ZONE_ID }}
+    env: &production-env
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.TF_STATE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.TF_STATE_SECRET_ACCESS_KEY }}
+      TF_STATE_BUCKET: ${{ vars.TF_STATE_BUCKET }}
+      TF_STATE_ENDPOINT: ${{ vars.TF_STATE_ENDPOINT }}
+      TF_VAR_account_id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      TF_VAR_domain: ${{ vars.PRODUCTION_DOMAIN }}
+      TF_VAR_railway_targets: ${{ vars.TF_RAILWAY_TARGETS || '{}' }}
+      TF_VAR_extra_dns_records: ${{ vars.TF_EXTRA_DNS_RECORDS || '[]' }}
+      TF_VAR_ssl_mode: ${{ vars.TF_SSL_MODE || 'full' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Terraform
         run: *install-terraform
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_TERRAFORM_PLAN_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
       - name: Plan
-        working-directory: envs/staging
+        working-directory: cloudflare
         run: |
-          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          printf 'bucket = "%s"\nendpoints = { s3 = "%s" }\n' "$TF_STATE_BUCKET" "$TF_STATE_ENDPOINT" > backend.hcl
+          terraform init -backend-config=backend.hcl
           terraform plan -lock=false -no-color
 
   apply:
     needs: [validate, gitleaks, plan]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.AWS_TERRAFORM_APPLY_ROLE_ARN != '' && vars.TF_STATE_BUCKET != ''
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.TF_STATE_BUCKET != '' && vars.CLOUDFLARE_ACCOUNT_ID != ''
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 30
     # Règles de protection (approbation) réglées sur l'environnement GitHub.
-    environment: staging
-    permissions:
-      contents: read
-      id-token: write
-    env: *staging-vars
+    environment: production
+    env: *production-env
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install Terraform
         run: *install-terraform
-      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
-        with:
-          role-to-assume: ${{ vars.AWS_TERRAFORM_APPLY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
       - name: Apply
-        working-directory: envs/staging
+        working-directory: cloudflare
         run: |
-          terraform init -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}"
+          printf 'bucket = "%s"\nendpoints = { s3 = "%s" }\n' "$TF_STATE_BUCKET" "$TF_STATE_ENDPOINT" > backend.hcl
+          terraform init -backend-config=backend.hcl
           terraform apply -auto-approve -no-color

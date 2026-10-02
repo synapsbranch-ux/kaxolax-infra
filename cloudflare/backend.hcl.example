@@ -1,0 +1,7 @@
+# Copier en backend.hcl (ignoré par git) : terraform init -backend-config=backend.hcl
+# Identifiants : jeton R2 limité au bucket d'état, exporté en AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY.
+bucket = "kaxolax-terraform-state"
+endpoints = {
+  # Bucket d'état dans la juridiction UE : https://<account-id>.eu.r2.cloudflarestorage.com
+  s3 = "https://<account-id>.eu.r2.cloudflarestorage.com"
+}

@@ -1,0 +1,27 @@
+# Copier en terraform.tfvars (ignoré par git). Aucune valeur secrète ici : le jeton d'API de
+# Terraform passe par CLOUDFLARE_API_TOKEN.
+
+account_id = "0123456789abcdef0123456789abcdef"
+domain     = "kaxolax.com"
+
+# Cibles données par Railway (railway/provision.sh les affiche) ; vides au premier apply.
+railway_targets = {
+  # app      = "xxxxxxxx.up.railway.app"
+  # admin    = "xxxxxxxx.up.railway.app"
+  # api      = "xxxxxxxx.up.railway.app"
+  # realtime = "xxxxxxxx.up.railway.app"
+}
+
+# Vérifications TXT des domaines Railway, enregistrements de l'expéditeur des emails (SPF, DKIM,
+# DMARC). name est relatif à la zone.
+extra_dns_records = [
+  # { name = "_railway-verify.app", type = "TXT", content = "railway-verify=..." },
+  # { name = "_dmarc", type = "TXT", content = "v=DMARC1; p=quarantine; rua=mailto:dmarc@kaxolax.com" },
+]
+
+# Passer à "strict" une fois les certificats des domaines émis par Railway.
+ssl_mode = "full"
+
+# admin_allowed_countries = ["FR"]
+# backup_retention_days   = 35
+# backup_lock_days        = 7

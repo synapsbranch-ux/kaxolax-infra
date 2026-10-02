@@ -7,3 +7,4 @@ crash.log
 !*.tfvars.example
 override.tf
 override.tf.json
+backend.hcl
