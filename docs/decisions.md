@@ -84,13 +84,13 @@ Chaque décision non triviale : contexte, décision, alternatives écartées (ci
 ## 2026-10-01 · R2 en juridiction UE, un jeton de compte par usage
 
 - Données des utilisateurs stockées dans l'UE (`jurisdiction = "eu"`, endpoint `<compte>.eu.r2…`), URL `r2.dev` désactivées.
-- Jetons de compte (indépendants des personnes) : `app` (fichiers et sorties), `backup` (sauvegardes), `templates_publish` (galerie), chacun avec le seul groupe « Workers R2 Storage Bucket Item Write » sur ses buckets ; restriction IP possible. Le Worker passe par ses bindings, sans jeton.
+- Jetons de compte (indépendants des personnes) : `app` (fichiers et sorties), `backup` (sauvegardes), `templates_publish` (galerie), chacun avec le seul groupe « Workers R2 Storage Bucket Item Write » sur ses buckets ; `backup_read` (test de restauration, qui détient la clé privée age) avec « Item Read » seulement ; restriction IP possible. Le Worker passe par ses bindings, sans jeton.
 - Écartée : un jeton unique pour tous les buckets (une fuite exposerait tout).
 
 ## 2026-10-01 · Sauvegardes : pg_dump vers R2, verrou et cycle de vie
 
 - Service cron Railway (image `scripts/backup/Dockerfile` de kaxolax-platform : PostgreSQL 18.6, rclone 1.75.1 et age 1.3.2 épinglés par empreinte) : `pg_dump` au format custom sur un instantané exporté, archive vérifiée, chiffrée avec age (clé publique seule dans Railway), manifeste (sha256, nombres de lignes), envoi sans jamais réécrire un objet.
-- Bucket verrouillé 7 jours (ni suppression ni écrasement, même avec le jeton du service) et expiré à 35 jours. Test de restauration scripté dans une base jetable, échec si la sauvegarde a plus de 26 h.
+- Bucket verrouillé 7 jours (ni suppression ni écrasement, même avec le jeton du service) ; rétention de 35 jours par le job (les 7 dernières toujours gardées), cycle de vie du bucket à 45 jours en filet de sécurité (à 35 jours, il effacerait aussi les dernières sauvegardes si le job s'arrêtait). Test de restauration scripté dans une base jetable, échec si la sauvegarde a plus de 26 h.
 - Écartées : sauvegardes de volume de Railway seules (même fournisseur que la base, pas de restauration testée) ; aws-cli (image plus lourde).
 
 ## 2026-10-01 · WAF et limitation de débit compatibles avec le plan Free

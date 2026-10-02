@@ -93,7 +93,8 @@ require_tools() {
 }
 
 # Sorties Terraform de cloudflare/ (domaines, variables R2). Les valeurs sensibles ne sont jamais
-# affichées : elles passent de jq à la CLI Railway par l'entrée standard.
+# affichées ni passées en argument d'une commande (visibles dans `ps` et /proc/<pid>/cmdline) :
+# elles circulent par l'entrée standard, les tubes ou l'environnement de jq.
 load_terraform_outputs() {
   TF_OUTPUTS="$(terraform -chdir="$TF_DIR" output -json)" || die "terraform output a échoué dans cloudflare/"
   HOST_APP="$(jq -r '.hostnames.value.app' <<<"$TF_OUTPUTS")"
@@ -103,8 +104,14 @@ load_terraform_outputs() {
   [[ "$HOST_APP" != null && -n "$HOST_APP" ]] || die "sortie hostnames absente : appliquer cloudflare/ d'abord"
 }
 
+# Objet JSON des variables R2 d'un service, écrit sur la sortie standard.
 tf_railway_variables() {
   jq -c --arg service "$1" '.railway_variables.value[$service]' <<<"$TF_OUTPUTS"
+}
+
+# Fusionne les objets JSON lus sur l'entrée standard (le dernier l'emporte).
+merge_objects() {
+  jq -cs 'add // {}'
 }
 
 # --- Projet et environnement -------------------------------------------------------------------
@@ -159,7 +166,8 @@ ensure_service() {
 # par Dockerfile, healthcheck, commande de pré-déploiement, cron. Railway ne sélectionne pas de
 # cible de build : KAXOLAX_SERVICE (variable de service, transmise comme argument de build)
 # choisit l'étape finale du Dockerfile de la plateforme. Réplicas dans la région UE de Railway
-# (realtime : plusieurs instances synchronisées par l'extension Redis de Hocuspocus).
+# (realtime : une instance tant que l'extension Redis de Hocuspocus, tâche 5, n'existe pas ; 2
+# ensuite, comme deploy/railway/realtime.json de la plateforme).
 readonly RAILWAY_REGION="${RAILWAY_REGION:-europe-west4-drams3a}"
 service_config() {
   local name="$1"
@@ -178,7 +186,7 @@ service_config() {
       ;;
     realtime)
       jq -n --arg df "$PLATFORM_DOCKERFILE" --arg region "$RAILWAY_REGION" \
-        '{build: {builder: "DOCKERFILE", dockerfilePath: $df}, deploy: {healthcheckPath: "/health", restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5, multiRegionConfig: {($region): {numReplicas: 2}}}}'
+        '{build: {builder: "DOCKERFILE", dockerfilePath: $df}, deploy: {healthcheckPath: "/health", restartPolicyType: "ON_FAILURE", restartPolicyMaxRetries: 5, multiRegionConfig: {($region): {numReplicas: 1}}}}'
       ;;
     backup)
       jq -n --arg cron "$BACKUP_CRON" \
@@ -242,14 +250,18 @@ ensure_secret() {
   fi
 }
 
+# Objet JSON des variables de l'opérateur (liste de noms en argument) définies et non vides. Les
+# valeurs sont lues par jq dans son environnement (`export` est une commande interne de bash) :
+# seuls les noms apparaissent dans sa ligne de commande.
 passthrough() {
-  local wanted='{}' key
+  local key
   for key in $1; do
     if [[ -n "${!key:-}" ]]; then
-      wanted="$(jq --arg k "$key" --arg v "${!key}" '.[$k] = $v' <<<"$wanted")"
+      export "${key?}"
     fi
   done
-  printf '%s' "$wanted"
+  jq -cn --arg keys "$1" \
+    '[$keys | splits(" +") | select(length > 0) | select((env[.] // "") != "") | {(.): env[.]}] | add // {}'
 }
 
 configure_variables() {
@@ -263,10 +275,11 @@ configure_variables() {
         ensure_secret api REALTIME_TOKEN_SECRET
         ensure_secret api INTERNAL_TOKEN
         ensure_secret api COMPILE_WORKER_SECRET
-        set_variables api "$(jq -n \
-          --arg app "https://$HOST_APP" --arg rt "wss://$HOST_REALTIME" --arg worker "$COMPILE_WORKER_URL" \
-          --argjson r2 "$(tf_railway_variables api)" --argjson pass "$(passthrough "$PASSTHROUGH_API")" \
-          '{
+        # Valeurs sensibles (R2, opérateur) fusionnées par un tube, jamais en argument.
+        set_variables api "$({
+          jq -n \
+            --arg app "https://$HOST_APP" --arg rt "wss://$HOST_REALTIME" --arg worker "$COMPILE_WORKER_URL" \
+            '{
             KAXOLAX_SERVICE: "api", NODE_ENV: "production", LOG_LEVEL: "info",
             HOST: "::", PORT: "3333", APP_URL: $app,
             TRUSTED_PROXY_HOPS: "2",
@@ -277,7 +290,10 @@ configure_variables() {
             REALTIME_PUBLIC_URL: $rt,
             REALTIME_INTERNAL_URL: "http://${{realtime.RAILWAY_PRIVATE_DOMAIN}}:1234",
             COMPILE_BACKEND: "cloudflare", COMPILE_WORKER_URL: $worker
-          } + $r2 + $pass')"
+          }'
+          tf_railway_variables api
+          passthrough "$PASSTHROUGH_API"
+        } | merge_objects)"
         ;;
       realtime)
         set_variables realtime "$(jq -n '{
@@ -290,17 +306,25 @@ configure_variables() {
         }')"
         ;;
       web | admin)
-        set_variables "$name" "$(jq -n --arg svc "$name" --argjson pass "$(passthrough "$PASSTHROUGH_WEB")" '{
-          KAXOLAX_SERVICE: $svc, NODE_ENV: "production",
-          HOSTNAME: "::", PORT: "3000",
-          API_INTERNAL_URL: "http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3333"
-        } + $pass')"
+        set_variables "$name" "$({
+          jq -n --arg svc "$name" '{
+            KAXOLAX_SERVICE: $svc, NODE_ENV: "production",
+            HOSTNAME: "::", PORT: "3000",
+            # Lue au build (réécritures /api figées par next build) : Railway la passe en argument.
+            API_INTERNAL_URL: "http://${{api.RAILWAY_PRIVATE_DOMAIN}}:3333"
+          }'
+          passthrough "$PASSTHROUGH_WEB"
+        } | merge_objects)"
         ;;
       backup)
-        set_variables backup "$(jq -n --argjson r2 "$(tf_railway_variables backup)" --argjson pass "$(passthrough AGE_RECIPIENT)" '{
-          DATABASE_URL: "${{Postgres.DATABASE_URL}}", BACKUP_PREFIX: "postgres",
-          BACKUP_RETENTION_DAYS: "35", BACKUP_MIN_KEEP: "7"
-        } + $r2 + $pass')"
+        set_variables backup "$({
+          jq -n '{
+            DATABASE_URL: "${{Postgres.DATABASE_URL}}", BACKUP_PREFIX: "postgres",
+            BACKUP_RETENTION_DAYS: "35", BACKUP_MIN_KEEP: "7"
+          }'
+          tf_railway_variables backup
+          passthrough AGE_RECIPIENT
+        } | merge_objects)"
         ;;
     esac
   done

@@ -23,5 +23,5 @@ extra_dns_records = [
 ssl_mode = "full"
 
 # admin_allowed_countries = ["FR"]
-# backup_retention_days   = 35
+# backup_retention_days   = 45
 # backup_lock_days        = 7

@@ -57,7 +57,7 @@ navigateur ──HTTPS/WSS──▶│ DNS (DNSSEC) · CDN · WAF · limitation 
 | `kaxolax-project-files`   | privé ; API (jeton `app`), Worker (binding)             | CORS app (GET, PUT), multipart purgé à 1 j |
 | `kaxolax-compile-outputs` | privé ; Worker (binding, écriture), API (URL présignées) | CORS app (GET, Range), expiration optionnelle |
 | `kaxolax-templates`       | public sur `templates.<domaine>` ; CI de kaxolax-templates | lecture seule pour le public, CORS app/admin |
-| `kaxolax-backups`         | privé ; service `backup` (jeton `backup`)               | verrou 7 j, expiration 35 j               |
+| `kaxolax-backups`         | privé ; service `backup` (jeton `backup`), test de restauration (jeton `backup_read`, lecture) | verrou 7 j, expiration 45 j |
 
 - Juridiction **UE** par défaut (données stockées dans l'Union européenne) ; endpoint S3
   `https://<compte>.eu.r2.cloudflarestorage.com`, avec le SDK S3 existant (`S3_REGION=auto`).
@@ -110,7 +110,9 @@ appartiennent déjà aux membres du projet.
   tables clés), sans jamais réécrire un objet. Rétention : 35 jours, au moins 7 sauvegardes.
 - Le **verrou R2** interdit suppression et écrasement pendant 7 jours, même avec le jeton du
   service : un jeton volé ne peut pas effacer les sauvegardes récentes. La règle de cycle de vie
-  supprime les sauvegardes après 35 jours (filet de sécurité de la rétention du script).
+  supprime les sauvegardes après 45 jours : filet de sécurité au-delà de la rétention du script
+  (35 jours, au moins les 7 plus récentes). Si le job s'arrête, cette règle finit par tout
+  effacer : la surveillance du job de sauvegarde (alerte sur échec ou absence) est indispensable.
 - `pg-restore-test.sh` restaure une sauvegarde dans une base temporaire, vérifie la somme et
   l'égalité exacte des nombres de lignes avec le manifeste, et échoue si la sauvegarde a plus de
   26 h. La clé privée age ne quitte pas le poste de l'opérateur (ou un service `restore-test`

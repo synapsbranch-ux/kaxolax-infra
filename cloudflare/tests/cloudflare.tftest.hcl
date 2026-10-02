@@ -12,6 +12,7 @@ variables {
   account_id                        = "0123456789abcdef0123456789abcdef"
   domain                            = "kaxolax.test"
   r2_item_write_permission_group_id = "bf7481a1826f439697cb59a20b22293e"
+  r2_item_read_permission_group_id  = "b4992e1108244f5d8bfbd5744320c2e1"
 }
 
 run "defaults" {
@@ -52,7 +53,8 @@ run "defaults" {
     error_message = "TLS settings are wrong."
   }
 
-  # Moindre privilège : chaque jeton ne vise que ses buckets, avec le seul groupe « Item Write ».
+  # Moindre privilège : chaque jeton ne vise que ses buckets, avec un seul groupe « Item Write »
+  # (ou « Item Read » pour le test de restauration).
   assert {
     condition = cloudflare_account_token.r2["app"].policies[0].resources == jsonencode({
       "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-project-files"   = "*"
@@ -76,8 +78,15 @@ run "defaults" {
   }
 
   assert {
-    condition     = alltrue([for t in cloudflare_account_token.r2 : length(t.policies) == 1 && t.policies[0].permission_groups[0].id == var.r2_item_write_permission_group_id && length(t.policies[0].permission_groups) == 1])
-    error_message = "R2 tokens must only carry the bucket item write permission group."
+    condition = cloudflare_account_token.r2["backup_read"].policies[0].resources == jsonencode({
+      "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-backups" = "*"
+    })
+    error_message = "The restore test token must only reach the backups bucket."
+  }
+
+  assert {
+    condition     = alltrue([for k, t in cloudflare_account_token.r2 : length(t.policies) == 1 && length(t.policies[0].permission_groups) == 1 && t.policies[0].permission_groups[0].id == (k == "backup_read" ? var.r2_item_read_permission_group_id : var.r2_item_write_permission_group_id)])
+    error_message = "R2 tokens must only carry one bucket item permission group (read only for the restore test)."
   }
 
   assert {
@@ -210,6 +219,16 @@ run "fails_without_r2_permission_group" {
   # Liste simulée vide : le groupe n'est pas trouvé.
   variables {
     r2_item_write_permission_group_id = null
+  }
+
+  expect_failures = [cloudflare_account_token.r2]
+}
+
+run "fails_without_r2_read_permission_group" {
+  command = plan
+
+  variables {
+    r2_item_read_permission_group_id = null
   }
 
   expect_failures = [cloudflare_account_token.r2]

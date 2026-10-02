@@ -43,7 +43,7 @@ output "templates_public_url" {
 
 # Identifiants S3 par jeton. Sensibles : terraform output -json r2_credentials.
 output "r2_credentials" {
-  description = "Identifiants S3 par jeton (app, backup, templates_publish) : access_key_id et secret_access_key."
+  description = "Identifiants S3 par jeton (app, backup, backup_read, templates_publish) : access_key_id et secret_access_key."
   sensitive   = true
   value = {
     for key, token in cloudflare_account_token.r2 : key => {
@@ -55,7 +55,7 @@ output "r2_credentials" {
 
 # Variables d'environnement prêtes à poser dans Railway, lues par railway/provision.sh.
 output "railway_variables" {
-  description = "Variables S3/R2 des services Railway (api, backup), clés et valeurs."
+  description = "Variables S3/R2 des services Railway (api, backup, restore_test), clés et valeurs."
   sensitive   = true
   value = {
     api = {
@@ -75,6 +75,14 @@ output "railway_variables" {
       BACKUP_S3_BUCKET            = cloudflare_r2_bucket.main["backups"].name
       BACKUP_S3_ACCESS_KEY_ID     = cloudflare_account_token.r2["backup"].id
       BACKUP_S3_SECRET_ACCESS_KEY = sha256(cloudflare_account_token.r2["backup"].value)
+    }
+    # Test de restauration : jeton en lecture seule sur le même bucket.
+    restore_test = {
+      BACKUP_S3_REGION            = "auto"
+      BACKUP_S3_ENDPOINT          = local.r2_s3_endpoint
+      BACKUP_S3_BUCKET            = cloudflare_r2_bucket.main["backups"].name
+      BACKUP_S3_ACCESS_KEY_ID     = cloudflare_account_token.r2["backup_read"].id
+      BACKUP_S3_SECRET_ACCESS_KEY = sha256(cloudflare_account_token.r2["backup_read"].value)
     }
   }
 }

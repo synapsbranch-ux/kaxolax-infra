@@ -3,9 +3,9 @@
 # du jeton (identifiant de clé = id du jeton, secret = SHA-256 de sa valeur), voir outputs.tf.
 # Le Worker de compilation n'a pas de jeton : il accède aux buckets par ses bindings R2.
 
-# Groupe de permissions cherché par nom, sauf s'il est fourni (r2_item_write_permission_group_id).
+# Groupes de permissions cherchés par nom, sauf s'ils sont fournis (r2_item_*_permission_group_id).
 data "cloudflare_account_api_token_permission_groups_list" "all" {
-  count = var.r2_item_write_permission_group_id == null ? 1 : 0
+  count = var.r2_item_write_permission_group_id == null || var.r2_item_read_permission_group_id == null ? 1 : 0
 
   account_id = var.account_id
 }
@@ -13,11 +13,17 @@ data "cloudflare_account_api_token_permission_groups_list" "all" {
 locals {
   # « Object Read & Write » du tableau de bord R2 : lecture, écriture, liste et suppression
   # d'objets, sans gestion des buckets (CORS, cycle de vie, verrou restent à Terraform).
-  r2_object_write_group_name = "Workers R2 Storage Bucket Item Write"
-  r2_object_write_group_ids = var.r2_item_write_permission_group_id != null ? [var.r2_item_write_permission_group_id] : [
-    for group in data.cloudflare_account_api_token_permission_groups_list.all[0].result : group.id
-    if group.name == local.r2_object_write_group_name
-  ]
+  # « Object Read only » : lecture et liste seulement.
+  r2_permission_groups = {
+    write = { name = "Workers R2 Storage Bucket Item Write", id = var.r2_item_write_permission_group_id }
+    read  = { name = "Workers R2 Storage Bucket Item Read", id = var.r2_item_read_permission_group_id }
+  }
+  r2_group_ids = {
+    for access, group in local.r2_permission_groups : access => group.id != null ? [group.id] : [
+      for candidate in data.cloudflare_account_api_token_permission_groups_list.all[0].result : candidate.id
+      if candidate.name == group.name
+    ]
+  }
 
   # Ressource d'un bucket dans une politique de jeton : <compte>_<juridiction>_<bucket>.
   bucket_resource = {
@@ -30,16 +36,26 @@ locals {
     app = {
       description = "API Kaxolax sur Railway"
       buckets     = ["project_files", "compile_outputs"]
+      access      = "write"
     }
-    # Service de sauvegarde (cron Railway) : dépôt des dumps et test de restauration.
+    # Service de sauvegarde (cron Railway) : dépôt des dumps et rotation.
     backup = {
       description = "Sauvegardes PostgreSQL"
       buckets     = ["backups"]
+      access      = "write"
+    }
+    # Test de restauration (cron facultatif ou poste d'opérateur) : lecture seule. Il détient la
+    # clé privée age : sa compromission ne doit pas permettre de supprimer les sauvegardes.
+    backup_read = {
+      description = "Test de restauration des sauvegardes"
+      buckets     = ["backups"]
+      access      = "read"
     }
     # CI du dépôt kaxolax-templates : publication de la galerie.
     templates_publish = {
       description = "Publication de la galerie (CI kaxolax-templates)"
       buckets     = ["templates"]
+      access      = "write"
     }
   }
 }
@@ -52,7 +68,7 @@ resource "cloudflare_account_token" "r2" {
 
   policies = [{
     effect            = "allow"
-    permission_groups = [for id in local.r2_object_write_group_ids : { id = id }]
+    permission_groups = [for id in local.r2_group_ids[each.value.access] : { id = id }]
     resources         = jsonencode({ for bucket in each.value.buckets : local.bucket_resource[bucket] => "*" })
   }]
 
@@ -62,8 +78,8 @@ resource "cloudflare_account_token" "r2" {
 
   lifecycle {
     precondition {
-      condition     = length(local.r2_object_write_group_ids) == 1
-      error_message = "Permission group \"Workers R2 Storage Bucket Item Write\" not found (or ambiguous) in this account."
+      condition     = length(local.r2_group_ids[each.value.access]) == 1
+      error_message = "Permission group \"${local.r2_permission_groups[each.value.access].name}\" not found (or ambiguous) in this account."
     }
   }
 }

@@ -64,7 +64,7 @@ réveil anticipé seulement à l'ouverture de l'éditeur (pas du tableau de bord
 ### Stockage
 
 50 Go de fichiers de projets, PDF et sauvegardes : ~0,60 $/mois. Les sauvegardes (35 jours de
-rétention) pèsent ~35 × la taille d'un dump compressé.
+rétention par le job) pèsent ~35 × la taille d'un dump compressé et chiffré.
 
 ## Total au lancement
 

@@ -254,15 +254,15 @@ variable "compile_outputs_retention_days" {
 
 variable "token_allowed_cidrs" {
   description = <<-EOT
-    Plages IP autorisées par jeton R2 (clés : app, backup, templates_publish). Vide : pas de
+    Plages IP autorisées par jeton R2 (clés : app, backup, backup_read, templates_publish). Vide : pas de
     restriction. Utile pour app et backup avec les IP de sortie statiques de Railway (plan Pro).
   EOT
   type        = map(list(string))
   default     = {}
 
   validation {
-    condition     = alltrue([for k in keys(var.token_allowed_cidrs) : contains(["app", "backup", "templates_publish"], k)])
-    error_message = "token_allowed_cidrs keys must be among: app, backup, templates_publish."
+    condition     = alltrue([for k in keys(var.token_allowed_cidrs) : contains(["app", "backup", "backup_read", "templates_publish"], k)])
+    error_message = "token_allowed_cidrs keys must be among: app, backup, backup_read, templates_publish."
   }
 
   validation {
@@ -288,5 +288,19 @@ variable "r2_item_write_permission_group_id" {
   validation {
     condition     = var.r2_item_write_permission_group_id == null || can(regex("^[0-9a-f]{32}$", var.r2_item_write_permission_group_id))
     error_message = "r2_item_write_permission_group_id must be null or a 32-character hexadecimal ID."
+  }
+}
+
+variable "r2_item_read_permission_group_id" {
+  description = <<-EOT
+    Identifiant du groupe de permissions « Workers R2 Storage Bucket Item Read » (jeton du test de
+    restauration). null : cherché par nom dans la liste des groupes du compte (cas normal).
+  EOT
+  type        = string
+  default     = null
+
+  validation {
+    condition     = var.r2_item_read_permission_group_id == null || can(regex("^[0-9a-f]{32}$", var.r2_item_read_permission_group_id))
+    error_message = "r2_item_read_permission_group_id must be null or a 32-character hexadecimal ID."
   }
 }

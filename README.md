@@ -37,7 +37,7 @@ Railway (réseau privé *.railway.internal) : web/admin → api → realtime, Po
 backup (cron quotidien : pg_dump → R2 kaxolax-backups)
 
 R2 (juridiction UE) : kaxolax-project-files, kaxolax-compile-outputs (privés, URL présignées),
-kaxolax-templates (public), kaxolax-backups (privé, verrou 7 j, expiration 35 j)
+kaxolax-templates (public), kaxolax-backups (privé, verrou 7 j, rétention 35 j par le job, expiration 45 j)
 ```
 
 Détails, flux de compilation asynchrone et écarts au sandbox de l'étape 1 :
@@ -93,8 +93,9 @@ applicatifs (APP_KEY, jetons internes) sont générés une fois dans Railway et 
 
 - Pas d'environnement de staging (décision C.1) ; `terraform test` et `--dry-run` tiennent lieu de
   contrôle avant application.
-- Le Dockerfile de kaxolax-platform doit permettre de choisir l'étape finale par argument de build
-  (`KAXOLAX_SERVICE`, posé par `provision.sh`) : Railway ne sélectionne pas de cible de build.
+- Railway ne sélectionne pas de cible de build : la dernière étape de `docker/Dockerfile` de
+  kaxolax-platform reprend celle que désigne l'argument `KAXOLAX_SERVICE` (variable posée par
+  `provision.sh`). Le service `admin` suppose la cible `admin` ajoutée par la tâche 13.
 - Plan Free de Cloudflare : une seule règle de limitation de débit, expression sur le chemin
   seulement, pas de Managed Ruleset complet. Le plan Pro lève ces limites (variable `rate_limits`).
 - Le test de restauration est lancé à la main (ou par un cron ajouté à la main) : il faut une base

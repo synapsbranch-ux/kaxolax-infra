@@ -57,9 +57,14 @@ Valeurs à reporter dans la configuration wrangler du Worker :
 terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
 ```
 
-- Bindings R2 : `project_files` et `compile_outputs`, avec `jurisdiction = "eu"`.
-- Domaine `compile.<domaine>` déclaré comme domaine personnalisé du Worker dans sa configuration
-  wrangler (wrangler crée l'enregistrement ; Terraform n'en gère pas sur ce nom).
+- `apps/compile-worker/wrangler.jsonc` : bindings R2 `PROJECT_FILES` et `COMPILE_OUTPUTS` (noms
+  de `r2_buckets`, `jurisdiction: "eu"`), variable `OUTPUTS_BUCKET_NAME`, et le domaine de
+  production à la place de `kaxolax.com` dans `routes` et `API_CALLBACK_URL`.
+- Domaine `compile.<domaine>` déclaré comme domaine personnalisé du Worker (`custom_domain`) :
+  wrangler crée l'enregistrement ; Terraform n'en gère pas sur ce nom.
+- Les rappels du Worker (`https://api.<domaine>/api/v1/internal/compile-callbacks`) traversent
+  la zone : ils sont exclus de la limitation de débit, et la règle WAF `/internal` ne vise que la
+  racine des chemins (routes internes des services), pas `/api/v1/internal/`.
 - Secret partagé avec l'API, posé après l'étape 4 :
   `railway variable list --service api --kv | grep '^COMPILE_WORKER_SECRET='` puis
   `pnpm wrangler secret put COMPILE_WORKER_SECRET`.
@@ -69,19 +74,21 @@ terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
 ## 4. Railway : projet, services, variables, domaines
 
 1. Railway → Account → Tokens : jeton de **workspace** ; GitHub : installer l'application Railway
-   sur kaxolax-platform et kaxolax-infra.
-2. Le Dockerfile de kaxolax-platform doit choisir son étape finale avec l'argument de build
-   `KAXOLAX_SERVICE` (web, admin, api, realtime), posé comme variable de chaque service.
+   sur kaxolax-platform (tous les services, sauvegarde comprise, sont construits depuis ce dépôt).
+2. Le Dockerfile de kaxolax-platform choisit son étape finale avec l'argument de build
+   `KAXOLAX_SERVICE` (web, admin, api, realtime), posé par le script comme variable de chaque
+   service (Railway le transmet comme argument de build).
 3. Lancer le provisionnement (d'abord à blanc) :
 
    ```sh
    export RAILWAY_API_TOKEN=… RAILWAY_WORKSPACE=… \
-     PLATFORM_REPO=<owner>/kaxolax-platform INFRA_REPO=<owner>/kaxolax-infra \
+     PLATFORM_REPO=<owner>/kaxolax-platform \
      COMPILE_WORKER_URL=https://compile.<domaine>
    # Secrets fournis par l'opérateur (gestionnaire de mots de passe), jamais dans un fichier :
    export CLERK_PUBLISHABLE_KEY=… CLERK_SECRET_KEY=… CLERK_JWT_KEY=… CLERK_WEBHOOK_SIGNING_SECRET=… \
      SMTP_HOST=… SMTP_PORT=465 SMTP_SECURE=true SMTP_USERNAME=… SMTP_PASSWORD=… \
-     MAIL_FROM_ADDRESS=… MAIL_FROM_NAME=Kaxolax
+     MAIL_FROM_ADDRESS=… MAIL_FROM_NAME=Kaxolax \
+     AGE_RECIPIENT=age1…   # clé publique des sauvegardes (étape 6)
    railway/provision.sh --dry-run
    railway/provision.sh
    ```
@@ -110,7 +117,8 @@ terraform -chdir=cloudflare output r2_s3_endpoint templates_public_url
 
 Dans le dépôt kaxolax-templates (environnement GitHub `templates`, branche `main` seulement) :
 variables `R2_ENDPOINT` (endpoint), `R2_BUCKET=kaxolax-templates` ; secrets `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`. L'API lit le catalogue sur `TEMPLATES_BASE_URL` (posé par provision.sh).
+`R2_SECRET_ACCESS_KEY`. `TEMPLATES_BASE_URL` (posé par provision.sh) est l'URL du catalogue pour l'API ; elle n'est
+pas encore lue par `start/env.ts` (galerie à brancher dans une tâche ultérieure), sans effet d'ici là.
 
 ## 6. Sauvegardes
 
@@ -131,7 +139,7 @@ depuis ce dépôt). Les sauvegardes sont chiffrées avec age : seule la clé pub
   docker build -f scripts/backup/Dockerfile -t kaxolax-pg-backup .
   docker run -d --name restore-db -e POSTGRES_PASSWORD=restore -p 127.0.0.1:55432:5432 postgres:18.6-alpine3.24
   terraform -chdir=../kaxolax-infra/cloudflare output -json railway_variables \
-    | jq -r '.backup | to_entries[] | "\(.key)=\(.value)"' > /tmp/backup.env
+    | jq -r '.restore_test | to_entries[] | "\(.key)=\(.value)"' > /tmp/backup.env
   docker run --rm --network host --env-file /tmp/backup.env \
     -e RESTORE_ADMIN_URL=postgres://postgres:restore@127.0.0.1:55432/postgres \
     -e AGE_IDENTITY="$(grep '^AGE-SECRET-KEY-' kaxolax-backup.key)" \
@@ -142,7 +150,9 @@ depuis ce dépôt). Les sauvegardes sont chiffrées avec age : seule la clé pub
   Le script vérifie la somme SHA-256, restaure dans une base temporaire, compare exactement les
   nombres de lignes des tables clés au manifeste et échoue si la sauvegarde a plus de 26 h. Il
   refuse une base égale à `DATABASE_URL`. Variante automatique : service `restore-test`
-  (`deploy/railway/pg-restore-test.json`), seulement avec un PostgreSQL distinct de la production.
+  (`deploy/railway/pg-restore-test.json`), seulement avec un PostgreSQL distinct de la production,
+  et avec les variables `restore_test` (jeton R2 `backup_read`, lecture seule), jamais le jeton
+  `backup` : ce service détient la clé privée age.
 - Restauration réelle (incident) : arrêter api et realtime, déchiffrer
   (`age --decrypt -i kaxolax-backup.key -o kaxolax.dump kaxolax.dump.age`), restaurer dans une
   base neuve avec `pg_restore --no-owner --no-acl --dbname=<nouvelle base> kaxolax.dump`,
@@ -154,7 +164,7 @@ depuis ce dépôt). Les sauvegardes sont chiffrées avec age : seule la clé pub
 ## 7. Rotation
 
 - Jeton R2 d'un service : `terraform -chdir=cloudflare apply -replace='cloudflare_account_token.r2["app"]'`
-  (ou `backup`, `templates_publish`), puis `railway/provision.sh` (les variables S3 changées sont
+  (ou `backup`, `backup_read`, `templates_publish`), puis `railway/provision.sh` (les variables S3 changées sont
   reposées) et redéploiement du service ; pour la galerie, mettre à jour les secrets GitHub.
 - Secret applicatif généré (ex. `INTERNAL_TOKEN`) : `railway variable delete INTERNAL_TOKEN --service api`,
   `railway/provision.sh` (nouvelle valeur), redéployer api et realtime. Pour
