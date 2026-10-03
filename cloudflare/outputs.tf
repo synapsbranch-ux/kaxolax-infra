@@ -1,5 +1,10 @@
 # Sorties : à reporter chez le registraire (serveurs de noms, DS), dans Railway
-# (railway/provision.sh les lit par « terraform output -json ») et dans la CI de kaxolax-templates.
+# (railway/provision.sh les lit par « terraform output -json ») et dans les CI de
+# kaxolax-templates et de kaxolax-texlive-images.
+
+locals {
+  templates_base_url = "https://${cloudflare_r2_custom_domain.templates.domain}"
+}
 
 output "zone_id" {
   description = "Identifiant de la zone (wrangler.jsonc du Worker de compilation, routes)."
@@ -37,13 +42,26 @@ output "r2_jurisdiction" {
 }
 
 output "templates_public_url" {
-  description = "URL publique de la galerie (catalogue templates.json, PDF, miniatures, zip)."
-  value       = "https://${cloudflare_r2_custom_domain.templates.domain}"
+  description = "URL publique de la galerie (PDF, miniatures, zip) : TEMPLATES_PUBLIC_URL de l'API."
+  value       = local.templates_base_url
+}
+
+output "templates_catalog_url" {
+  description = "Catalogue templates.json publié par kaxolax-templates (à la racine du bucket) : TEMPLATES_CATALOG_URL de l'API."
+  value       = "${local.templates_base_url}/templates.json"
+}
+
+output "texlive_index" {
+  description = "Index des packages TeX Live : bucket et clé où la CI de kaxolax-texlive-images le publie (R2_PUBLIC_BUCKET) et où l'API le lit."
+  value = {
+    bucket = cloudflare_r2_bucket.main["texlive_index"].name
+    key    = var.texlive_index_key
+  }
 }
 
 # Identifiants S3 par jeton. Sensibles : terraform output -json r2_credentials.
 output "r2_credentials" {
-  description = "Identifiants S3 par jeton (app, backup, backup_read, templates_publish) : access_key_id et secret_access_key."
+  description = "Identifiants S3 par jeton (app, backup, backup_read, templates_publish, texlive_publish) : access_key_id et secret_access_key."
   sensitive   = true
   value = {
     for key, token in cloudflare_account_token.r2 : key => {
@@ -55,7 +73,7 @@ output "r2_credentials" {
 
 # Variables d'environnement prêtes à poser dans Railway, lues par railway/provision.sh.
 output "railway_variables" {
-  description = "Variables S3/R2 des services Railway (api, backup, restore_test), clés et valeurs."
+  description = "Variables R2 et galerie des services Railway (api, backup, restore_test), clés et valeurs."
   sensitive   = true
   value = {
     api = {
@@ -67,7 +85,12 @@ output "railway_variables" {
       S3_SECRET_ACCESS_KEY      = sha256(cloudflare_account_token.r2["app"].value)
       S3_BUCKET_PROJECT_FILES   = cloudflare_r2_bucket.main["project_files"].name
       S3_BUCKET_COMPILE_OUTPUTS = cloudflare_r2_bucket.main["compile_outputs"].name
-      TEMPLATES_BASE_URL        = "https://${cloudflare_r2_custom_domain.templates.domain}"
+      # Galerie (catalogue à la racine du bucket public, lu par HTTPS) et index des packages TeX
+      # Live (bucket privé, lu avec le jeton app en lecture seule).
+      TEMPLATES_CATALOG_URL = "${local.templates_base_url}/templates.json"
+      TEMPLATES_PUBLIC_URL  = local.templates_base_url
+      TEXLIVE_INDEX_BUCKET  = cloudflare_r2_bucket.main["texlive_index"].name
+      TEXLIVE_INDEX_KEY     = var.texlive_index_key
     }
     backup = {
       BACKUP_S3_REGION            = "auto"

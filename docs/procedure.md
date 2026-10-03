@@ -9,8 +9,11 @@ Commandes depuis la racine de ce dépôt, sauf mention contraire.
   conseillé), GitHub (dépôts kaxolax-platform, kaxolax-infra, kaxolax-templates), Clerk (instance
   de production), fournisseur SMTP.
 - Domaine enregistré chez un registraire qui accepte DNSSEC.
-- Outils : Terraform 1.16.4, CLI Railway ≥ 5.42, `jq`, `openssl`, `docker`, `age` ; dans
+- Outils : Terraform 1.16.4, CLI Railway ≥ 5.42, `jq`, `openssl`, `curl`, `docker`, `age` ; dans
   kaxolax-platform : `pnpm` (wrangler y est une dépendance).
+- Une copie de kaxolax-platform à la révision déployée, à côté de ce dépôt
+  (`../kaxolax-platform`, sinon `PLATFORM_DIR`) : `railway/provision.sh` lit ses
+  `deploy/railway/*.json`, et le Worker se déploie depuis elle.
 
 ## 1. État Terraform et jeton de Terraform (une fois)
 
@@ -67,9 +70,25 @@ terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
   racine des chemins (routes internes des services), pas `/api/v1/internal/`.
 - Secret partagé avec l'API, posé après l'étape 4 :
   `railway variable list --service api --kv | grep '^COMPILE_WORKER_SECRET='` puis
-  `pnpm wrangler secret put COMPILE_WORKER_SECRET`.
-- Déploiement : `pnpm wrangler deploy` (jeton créé depuis le modèle « Edit Cloudflare Workers »,
-  avec la permission Containers en écriture). Ce jeton n'est pas créé par Terraform.
+  `pnpm --filter @kaxolax/compile-worker exec wrangler secret put COMPILE_WORKER_SECRET`.
+- Image TeX Live épinglée, **avant le déploiement** : `docker buildx imagetools inspect
+  ghcr.io/synapsbranch-ux/kaxolax-texlive:2026-medium` donne l'empreinte `sha256:…` de l'image
+  publiée ; l'ajouter à `ARG TEXLIVE_IMAGE=…:2026-medium@sha256:…` de
+  `apps/compile-worker/container/Dockerfile` (seule référence) et poser la même dans
+  `texlive_digest` de `scripts/build.sh` de kaxolax-templates. Sans empreinte, la construction du
+  conteneur par `wrangler deploy` échoue (`image_vars` de `wrangler.jsonc` passe
+  `TEXLIVE_REQUIRE_PINNED=1`) : une étiquette peut désigner une autre image sans aucun commit.
+- Déploiement : `pnpm --filter @kaxolax/compile-worker run deploy` (avec `run` : `pnpm deploy`
+  seul est une commande intégrée de pnpm, qui copie un paquet du workspace et ne déploie rien),
+  avec un jeton d'API
+  **personnalisé, au moindre privilège** (`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`),
+  jamais le modèle « Edit Cloudflare Workers », qui donne aussi la gestion des buckets R2 et de
+  KV sur tout le compte (un jeton volé pourrait retirer le verrou de `kaxolax-backups` puis tout
+  effacer). Permissions : compte → « Workers Scripts : Edit », « Containers : Edit » (et
+  « Account Settings : Read » si wrangler le demande) ; zone de production → « Workers Routes :
+  Edit ». Ni « Workers R2 Storage » ni KV : déclarer un binding R2 n'exige pas de gérer les
+  buckets, dont la création, le verrou et le cycle de vie restent à Terraform. Ce jeton n'est pas
+  créé par Terraform (même règle que `docs/deploy.md` de kaxolax-platform).
 
 ## 4. Railway : projet, services, variables, domaines
 
@@ -82,10 +101,11 @@ terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
 
    ```sh
    export RAILWAY_API_TOKEN=… RAILWAY_WORKSPACE=… \
-     PLATFORM_REPO=<owner>/kaxolax-platform \
+     PLATFORM_REPO=<owner>/kaxolax-platform PLATFORM_DIR=../kaxolax-platform \
      COMPILE_WORKER_URL=https://compile.<domaine>
    # Secrets fournis par l'opérateur (gestionnaire de mots de passe), jamais dans un fichier :
    export CLERK_PUBLISHABLE_KEY=… CLERK_SECRET_KEY=… CLERK_JWT_KEY=… CLERK_WEBHOOK_SIGNING_SECRET=… \
+     ANTHROPIC_API_KEY=… \
      SMTP_HOST=… SMTP_PORT=465 SMTP_SECURE=true SMTP_USERNAME=… SMTP_PASSWORD=… \
      MAIL_FROM_ADDRESS=… MAIL_FROM_NAME=Kaxolax \
      AGE_RECIPIENT=age1…   # clé publique des sauvegardes (étape 6)
@@ -94,10 +114,17 @@ terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
    ```
 
    Le script crée ce qui manque (projet, PostgreSQL, Redis, services web, admin, api, realtime,
-   backup), pose les variables sans redéployer, règle Dockerfile, healthchecks, migrations
-   (pré-déploiement de l'API) et cron de sauvegarde, puis ajoute les domaines personnalisés.
-   Relancé, il ne recrée rien et garde les secrets générés (APP_KEY, REALTIME_TOKEN_SECRET,
-   INTERNAL_TOKEN, COMPILE_WORKER_SECRET).
+   backup) et pose les variables sans redéployer. Il déclare ensuite pour chaque service son
+   fichier « config as code » (`/deploy/railway/<service>.json`, `pg-backup.json` pour backup :
+   Settings → Config-as-code → Railway Config File, par l'API publique de Railway ; à poser à la
+   main si le script l'annonce) et applique les sections `build` et `deploy` de ces fichiers
+   (Dockerfile, `watchPatterns`, healthcheck et `healthcheckTimeout`, `drainingSeconds`,
+   migrations en pré-déploiement de l'API, réplicas, cron de sauvegarde) : la CLI les applique
+   par un commit d'environnement, qui redéploie les services concernés. Enfin il ajoute les
+   domaines personnalisés (admin sur le port 3001, web 3000, api 3333, realtime 1234). Relancé,
+   il ne recrée rien et garde les secrets générés (APP_KEY, REALTIME_TOKEN_SECRET,
+   INTERNAL_TOKEN, COMPILE_WORKER_SECRET) ; une variable que l'API ne lit plus (`REDIS_URL`,
+   `TEMPLATES_BASE_URL`) est signalée, jamais supprimée.
 4. Reporter les cibles affichées (« enregistrements DNS demandés par Railway ») dans
    `cloudflare/terraform.tfvars` : CNAME dans `railway_targets`, TXT de vérification éventuels
    dans `extra_dns_records`. Puis `terraform -chdir=cloudflare apply`.
@@ -105,20 +132,46 @@ terraform -chdir=cloudflare output r2_buckets r2_jurisdiction zone_id
    `ssl_mode = "strict"` et `terraform -chdir=cloudflare apply`.
 6. Déployer : `railway redeploy --service <service>` pour chacun (ou un push sur `main`).
 
-Services `admin` absents de la plateforme au moment du provisionnement : `SERVICES="web api
-realtime backup" railway/provision.sh`.
+`SERVICES` restreint les services gérés (ex. `SERVICES="api" railway/provision.sh` pour reposer
+les variables de l'API après une rotation). Les valeurs de construction et de déploiement ne se
+changent que dans `deploy/railway/*.json` de kaxolax-platform (le cron de sauvegarde compris) :
+Railway les relit à chaque déploiement.
 
-## 5. Galerie de templates (kaxolax-templates)
+## 5. Galerie de templates (`kaxolax-templates`) et index TeX Live (`kaxolax-texlive-index`)
+
+Le bucket public `kaxolax-templates` (`templates.<domaine>`) porte la galerie, publiée à sa
+racine par kaxolax-templates, son seul rédacteur. L'index des packages TeX Live, publié sous
+`texlive/` par kaxolax-texlive-images, a son bucket **privé** `kaxolax-texlive-index` (ni
+domaine public, ni expiration). L'API lit le catalogue par HTTPS (`TEMPLATES_CATALOG_URL`,
+`https://templates.<domaine>/templates.json`, et `TEMPLATES_PUBLIC_URL`) et l'index par l'API S3
+avec son jeton `app`, en lecture seule sur le bucket de l'index
+(`TEXLIVE_INDEX_BUCKET=kaxolax-texlive-index`, `TEXLIVE_INDEX_KEY=texlive/2026/packages.json`) :
+`provision.sh` pose ces quatre variables depuis les sorties Terraform.
 
 ```sh
+terraform -chdir=cloudflare output r2_s3_endpoint templates_catalog_url texlive_index
 terraform -chdir=cloudflare output -json r2_credentials | jq '.templates_publish'
-terraform -chdir=cloudflare output r2_s3_endpoint templates_public_url
+terraform -chdir=cloudflare output -json r2_credentials | jq '.texlive_publish'
 ```
 
-Dans le dépôt kaxolax-templates (environnement GitHub `templates`, branche `main` seulement) :
-variables `R2_ENDPOINT` (endpoint), `R2_BUCKET=kaxolax-templates` ; secrets `R2_ACCESS_KEY_ID`,
-`R2_SECRET_ACCESS_KEY`. `TEMPLATES_BASE_URL` (posé par provision.sh) est l'URL du catalogue pour l'API ; elle n'est
-pas encore lue par `start/env.ts` (galerie à brancher dans une tâche ultérieure), sans effet d'ici là.
+**kaxolax-templates** (Settings → Secrets and variables → Actions) :
+
+- variables **du dépôt** (onglet « Variables », niveau dépôt et non environnement : la condition
+  du job `publish` les lit avant d'entrer dans l'environnement) : `R2_BUCKET=kaxolax-templates`,
+  `R2_ENDPOINT=https://<compte>.eu.r2.cloudflarestorage.com` (`r2_s3_endpoint`) ; `R2_PREFIX`
+  vide (le catalogue doit rester à la racine, où l'API le lit) ;
+- secrets de l'**environnement** `templates` (déploiement limité à `main`, règle posée avant les
+  secrets) : `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (jeton `templates_publish`).
+
+**kaxolax-texlive-images** : environnement `r2-package-index` (limité à `main`) avec les
+secrets `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY` (jeton `texlive_publish`) et les variables
+`R2_ENDPOINT` (`r2_s3_endpoint`) et `R2_PUBLIC_BUCKET=kaxolax-texlive-index`
+(`texlive_index.bucket`) ; le workflow de ce dépôt ne change pas.
+
+R2 ne restreint pas un jeton à un préfixe, d'où un bucket par rédacteur : `texlive_publish`
+n'écrit que l'index. Sur le bucket de la galerie, il aurait pu réécrire `templates.json`, les zip
+importés dans les projets (avec leur sha256, seule vérification de l'API) et le contenu servi sur
+`templates.<domaine>`, sans revue. Les deux environnements GitHub restent limités à `main`.
 
 ## 6. Sauvegardes
 
@@ -164,8 +217,9 @@ depuis ce dépôt). Les sauvegardes sont chiffrées avec age : seule la clé pub
 ## 7. Rotation
 
 - Jeton R2 d'un service : `terraform -chdir=cloudflare apply -replace='cloudflare_account_token.r2["app"]'`
-  (ou `backup`, `backup_read`, `templates_publish`), puis `railway/provision.sh` (les variables S3 changées sont
-  reposées) et redéploiement du service ; pour la galerie, mettre à jour les secrets GitHub.
+  (ou `backup`, `backup_read`, `templates_publish`, `texlive_publish`), puis `railway/provision.sh`
+  (les variables S3 changées sont reposées) et redéploiement du service ; pour la galerie et
+  l'index TeX Live, mettre à jour les secrets GitHub de l'environnement concerné.
 - Secret applicatif généré (ex. `INTERNAL_TOKEN`) : `railway variable delete INTERNAL_TOKEN --service api`,
   `railway/provision.sh` (nouvelle valeur), redéployer api et realtime. Pour
   `COMPILE_WORKER_SECRET`, reposer aussi le secret du Worker.

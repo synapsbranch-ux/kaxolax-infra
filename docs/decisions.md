@@ -102,3 +102,24 @@ Chaque décision non triviale : contexte, décision, alternatives écartées (ci
 
 - Contexte : Railway émet les certificats de ses domaines personnalisés après la création du CNAME ; en `strict`, la première émission échouerait derrière le proxy.
 - Décision : `ssl_mode = "full"` au premier déploiement, puis `strict` (procédure, étape 4). `flexible` est refusé par la validation.
+
+## 2026-10-03 · Index TeX Live dans un bucket privé, un seul rédacteur pour la galerie
+
+- L'index des packages (kaxolax-texlive-images) est publié sous `texlive/` du bucket **privé** `kaxolax-texlive-index` (ni domaine public, ni expiration). L'API le lit par l'API S3 (`TEXLIVE_INDEX_BUCKET`, `TEXLIVE_INDEX_KEY`, sorties de `railway_variables.api` et `texlive_index`) ; côté texlive-images, seule la variable `R2_PUBLIC_BUCKET` change.
+- Jetons : `app` en « Item Write » sur les fichiers et les sorties, « Item Read » sur l'index (la galerie se lit par HTTPS) ; `texlive_publish` en « Item Write » sur l'index seulement ; `templates_publish`, seul rédacteur de `kaxolax-templates`.
+- Écartée : l'index sous `texlive/` du bucket de la galerie. R2 ne restreint pas un jeton à un préfixe : le jeton de texlive-images (fuite d'un secret de `r2-package-index`, modification malveillante de son `main`) aurait pu remplacer un zip de template et son sha256 dans `templates.json` (seule vérification de l'API à l'import), ou déposer du HTML sur `templates.<domaine>`, sans revue.
+- La galerie sort `TEMPLATES_CATALOG_URL` (`https://templates.<domaine>/templates.json`) et `TEMPLATES_PUBLIC_URL`, lues par l'API, à la place de `TEMPLATES_BASE_URL` que rien ne lisait.
+
+## 2026-10-03 · Cycle de vie R2 aligné sur le local
+
+- Sorties de compilation expirées à 7 jours (`compile_outputs_retention_days`, plus de valeur « conservées ») : elles contiennent les sources envoyées au Worker et les PDF, recompilables à la demande. Téléversements en attente (`uploads/` des fichiers de projet) expirés à 1 jour. Mêmes règles que `docker/s3-init/init-buckets.sh` de kaxolax-platform.
+- CORS de la galerie : en-tête `Range` autorisé, `Accept-Ranges`, `Content-Length`, `Content-Range` et `ETag` exposés, sans quoi pdf.js renonce aux plages pour l'aperçu des PDF.
+
+## 2026-10-03 · provision.sh lit deploy/railway/*.json
+
+- Les valeurs de construction et de déploiement (Dockerfile, `watchPatterns`, healthcheck et délai, `drainingSeconds`, migrations, réplicas, cron) ne sont plus recopiées dans le script : il lit les sections `build` et `deploy` des fichiers de kaxolax-platform (`PLATFORM_DIR`) et déclare chacun comme « Railway Config File » du service par l'API GraphQL publique (`serviceInstanceUpdate`, absent de la CLI ; échec signalé, chemin à poser à la main). La copie divergeait (realtime à 1 réplica, healthcheck `/` de l'admin).
+- `REDIS_URL` n'est plus posée sur l'api (seul realtime utilise Redis) ; `ADMIN_URL` l'est ; l'admin écoute sur 3001 (port de son image). Une variable obsolète restante est signalée, jamais supprimée.
+
+## 2026-10-03 · Jeton de déploiement du Worker au moindre privilège
+
+- Jeton personnalisé (compte : Workers Scripts et Containers en écriture ; zone : Workers Routes), jamais le modèle « Edit Cloudflare Workers », qui donne la gestion de R2 et de KV sur tout le compte et permettrait de retirer le verrou des sauvegardes. Aligné sur `docs/deploy.md` de kaxolax-platform.

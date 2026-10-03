@@ -196,11 +196,12 @@ variable "r2_location" {
 }
 
 variable "bucket_names" {
-  description = "Noms des buckets R2 (globaux au compte). Le bucket de la galerie suit le dépôt kaxolax-templates."
+  description = "Noms des buckets R2 (globaux au compte). Le bucket de la galerie suit le dépôt kaxolax-templates ; celui de l'index TeX Live est R2_PUBLIC_BUCKET de kaxolax-texlive-images."
   type = object({
     project_files   = optional(string, "kaxolax-project-files")
     compile_outputs = optional(string, "kaxolax-compile-outputs")
     templates       = optional(string, "kaxolax-templates")
+    texlive_index   = optional(string, "kaxolax-texlive-index")
     backups         = optional(string, "kaxolax-backups")
   })
   default = {}
@@ -242,27 +243,63 @@ variable "backup_lock_days" {
 }
 
 variable "compile_outputs_retention_days" {
-  description = "Suppression automatique des sorties de compilation après N jours. null : conservées."
+  description = <<-EOT
+    Expiration des sorties de compilation (PDF, journaux, SyncTeX, demandes avec les sources) après
+    N jours, comme en local (docker/s3-init de kaxolax-platform). L'API recompile à la demande ;
+    la suppression d'un projet efface aussi ses sorties.
+  EOT
   type        = number
-  default     = null
+  default     = 7
+  nullable    = false
 
   validation {
-    condition     = var.compile_outputs_retention_days == null || try(var.compile_outputs_retention_days >= 1, false)
-    error_message = "compile_outputs_retention_days must be null or at least 1."
+    condition     = var.compile_outputs_retention_days >= 1 && var.compile_outputs_retention_days <= 365
+    error_message = "compile_outputs_retention_days must be between 1 and 365."
+  }
+}
+
+variable "pending_uploads_retention_days" {
+  description = <<-EOT
+    Expiration des téléversements en attente (préfixe uploads/ du bucket des fichiers) : un fichier
+    envoyé par URL présignée mais jamais confirmé est effacé après N jours, comme en local.
+  EOT
+  type        = number
+  default     = 1
+  nullable    = false
+
+  validation {
+    condition     = var.pending_uploads_retention_days >= 1 && var.pending_uploads_retention_days <= 30
+    error_message = "pending_uploads_retention_days must be between 1 and 30."
+  }
+}
+
+variable "texlive_index_key" {
+  description = <<-EOT
+    Clé de l'index des packages TeX Live dans le bucket privé de l'index
+    (bucket_names.texlive_index, jamais la galerie publique), publié par la CI de
+    kaxolax-texlive-images et lu par l'API (TEXLIVE_INDEX_KEY). Change avec l'année de TeX Live.
+  EOT
+  type        = string
+  default     = "texlive/2026/packages.json"
+
+  validation {
+    condition     = can(regex("^texlive/[0-9]{4}/packages\\.json$", var.texlive_index_key))
+    error_message = "texlive_index_key must look like texlive/<year>/packages.json."
   }
 }
 
 variable "token_allowed_cidrs" {
   description = <<-EOT
-    Plages IP autorisées par jeton R2 (clés : app, backup, backup_read, templates_publish). Vide : pas de
-    restriction. Utile pour app et backup avec les IP de sortie statiques de Railway (plan Pro).
+    Plages IP autorisées par jeton R2 (clés : app, backup, backup_read, templates_publish,
+    texlive_publish). Vide : pas de restriction. Utile pour app et backup avec les IP de sortie
+    statiques de Railway (plan Pro).
   EOT
   type        = map(list(string))
   default     = {}
 
   validation {
-    condition     = alltrue([for k in keys(var.token_allowed_cidrs) : contains(["app", "backup", "backup_read", "templates_publish"], k)])
-    error_message = "token_allowed_cidrs keys must be among: app, backup, backup_read, templates_publish."
+    condition     = alltrue([for k in keys(var.token_allowed_cidrs) : contains(["app", "backup", "backup_read", "templates_publish", "texlive_publish"], k)])
+    error_message = "token_allowed_cidrs keys must be among: app, backup, backup_read, templates_publish, texlive_publish."
   }
 
   validation {
@@ -293,8 +330,9 @@ variable "r2_item_write_permission_group_id" {
 
 variable "r2_item_read_permission_group_id" {
   description = <<-EOT
-    Identifiant du groupe de permissions « Workers R2 Storage Bucket Item Read » (jeton du test de
-    restauration). null : cherché par nom dans la liste des groupes du compte (cas normal).
+    Identifiant du groupe de permissions « Workers R2 Storage Bucket Item Read » (test de
+    restauration, lecture de l'index TeX Live par l'API). null : cherché par nom dans la liste des
+    groupes du compte (cas normal).
   EOT
   type        = string
   default     = null

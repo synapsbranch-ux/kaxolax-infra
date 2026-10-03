@@ -19,8 +19,8 @@ run "defaults" {
   command = plan
 
   assert {
-    condition     = length(cloudflare_r2_bucket.main) == 4 && alltrue([for b in cloudflare_r2_bucket.main : b.jurisdiction == "eu"])
-    error_message = "Four R2 buckets in the EU jurisdiction are expected."
+    condition     = length(cloudflare_r2_bucket.main) == 5 && alltrue([for b in cloudflare_r2_bucket.main : b.jurisdiction == "eu"])
+    error_message = "Five R2 buckets in the EU jurisdiction are expected."
   }
 
   assert {
@@ -53,14 +53,21 @@ run "defaults" {
     error_message = "TLS settings are wrong."
   }
 
-  # Moindre privilège : chaque jeton ne vise que ses buckets, avec un seul groupe « Item Write »
-  # (ou « Item Read » pour le test de restauration).
+  # Moindre privilège : chaque jeton ne vise que ses buckets, une politique par niveau d'accès
+  # (« Item Write », puis « Item Read »).
   assert {
     condition = cloudflare_account_token.r2["app"].policies[0].resources == jsonencode({
       "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-project-files"   = "*"
       "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-compile-outputs" = "*"
-    })
-    error_message = "The app token must only reach the project files and compile outputs buckets."
+    }) && cloudflare_account_token.r2["app"].policies[0].permission_groups[0].id == var.r2_item_write_permission_group_id
+    error_message = "The app token must only write to the project files and compile outputs buckets."
+  }
+
+  assert {
+    condition = length(cloudflare_account_token.r2["app"].policies) == 2 && cloudflare_account_token.r2["app"].policies[1].resources == jsonencode({
+      "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-texlive-index" = "*"
+    }) && cloudflare_account_token.r2["app"].policies[1].permission_groups[0].id == var.r2_item_read_permission_group_id
+    error_message = "The app token must only read the TeX Live package index bucket (the gallery is read over HTTPS)."
   }
 
   assert {
@@ -74,7 +81,26 @@ run "defaults" {
     condition = cloudflare_account_token.r2["templates_publish"].policies[0].resources == jsonencode({
       "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-templates" = "*"
     })
-    error_message = "The templates token must only reach the gallery bucket."
+    error_message = "The gallery token must only reach the gallery bucket."
+  }
+
+  # La galerie publique (catalogue, zip importés dans les projets, contenu de templates.<domaine>)
+  # n'a qu'un rédacteur : la CI de kaxolax-templates.
+  assert {
+    condition = cloudflare_account_token.r2["texlive_publish"].policies[0].resources == jsonencode({
+      "com.cloudflare.edge.r2.bucket.0123456789abcdef0123456789abcdef_eu_kaxolax-texlive-index" = "*"
+    }) && [for k, t in cloudflare_account_token.r2 : k if strcontains(join(" ", [for p in t.policies : p.resources]), "_eu_kaxolax-templates\"")] == ["templates_publish"]
+    error_message = "Only the gallery token may reach the gallery bucket; the TeX Live index token writes its own private bucket."
+  }
+
+  assert {
+    condition     = cloudflare_r2_custom_domain.templates.bucket_name == "kaxolax-templates" && cloudflare_r2_managed_domain.disabled["texlive_index"].enabled == false
+    error_message = "The TeX Live index bucket must stay private (no custom domain, no r2.dev URL)."
+  }
+
+  assert {
+    condition     = cloudflare_account_token.r2["texlive_publish"].name == "kaxolax-production-r2-texlive-publish"
+    error_message = "The TeX Live index publishing token must be separate from the gallery token."
   }
 
   assert {
@@ -85,8 +111,8 @@ run "defaults" {
   }
 
   assert {
-    condition     = alltrue([for k, t in cloudflare_account_token.r2 : length(t.policies) == 1 && length(t.policies[0].permission_groups) == 1 && t.policies[0].permission_groups[0].id == (k == "backup_read" ? var.r2_item_read_permission_group_id : var.r2_item_write_permission_group_id)])
-    error_message = "R2 tokens must only carry one bucket item permission group (read only for the restore test)."
+    condition     = alltrue([for k, t in cloudflare_account_token.r2 : k == "app" || (length(t.policies) == 1 && length(t.policies[0].permission_groups) == 1 && t.policies[0].permission_groups[0].id == (k == "backup_read" ? var.r2_item_read_permission_group_id : var.r2_item_write_permission_group_id))])
+    error_message = "R2 tokens other than app must only carry one bucket item permission group (read only for the restore test)."
   }
 
   assert {
@@ -105,8 +131,38 @@ run "defaults" {
   }
 
   assert {
-    condition     = length(cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules) == 1
-    error_message = "Compile outputs are kept by default."
+    condition     = length(cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules) == 2 && cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules[1].delete_objects_transition.condition.max_age == 7 * 86400 && cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules[1].conditions.prefix == ""
+    error_message = "Compile outputs (user data) must expire after seven days, as in the local stack."
+  }
+
+  assert {
+    condition     = length(cloudflare_r2_bucket_lifecycle.standard["project_files"].rules) == 2 && cloudflare_r2_bucket_lifecycle.standard["project_files"].rules[1].conditions.prefix == "uploads/" && cloudflare_r2_bucket_lifecycle.standard["project_files"].rules[1].delete_objects_transition.condition.max_age == 86400
+    error_message = "Pending uploads (and only them) must expire after one day."
+  }
+
+  assert {
+    condition     = alltrue([for key in ["templates", "texlive_index"] : length(cloudflare_r2_bucket_lifecycle.standard[key].rules) == 1 && cloudflare_r2_bucket_lifecycle.standard[key].rules[0].id == "abort-incomplete-multipart"])
+    error_message = "Gallery files and the TeX Live index never expire."
+  }
+
+  assert {
+    condition     = cloudflare_r2_bucket_cors.templates.rules[0].allowed.headers == tolist(["range"]) && contains(cloudflare_r2_bucket_cors.templates.rules[0].expose_headers, "Content-Range") && contains(cloudflare_r2_bucket_cors.templates.rules[0].expose_headers, "Accept-Ranges")
+    error_message = "pdf.js must be able to read gallery PDFs by range (Range allowed, range headers exposed)."
+  }
+
+  assert {
+    condition     = output.railway_variables.api.TEMPLATES_CATALOG_URL == "https://templates.kaxolax.test/templates.json" && output.railway_variables.api.TEMPLATES_PUBLIC_URL == "https://templates.kaxolax.test" && output.templates_catalog_url == output.railway_variables.api.TEMPLATES_CATALOG_URL
+    error_message = "The API must receive the gallery catalog URL it reads (TEMPLATES_CATALOG_URL)."
+  }
+
+  assert {
+    condition     = output.railway_variables.api.TEXLIVE_INDEX_BUCKET == "kaxolax-texlive-index" && output.railway_variables.api.TEXLIVE_INDEX_KEY == "texlive/2026/packages.json" && output.texlive_index.bucket == "kaxolax-texlive-index"
+    error_message = "The API must read the TeX Live package index from its private bucket."
+  }
+
+  assert {
+    condition     = !contains(keys(output.railway_variables.api), "TEMPLATES_BASE_URL")
+    error_message = "TEMPLATES_BASE_URL is not read by the API."
   }
 
   assert {
@@ -167,8 +223,8 @@ run "railway_records_and_options" {
   }
 
   assert {
-    condition     = length(cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules) == 2
-    error_message = "Compile outputs retention rule must be added."
+    condition     = cloudflare_r2_bucket_lifecycle.standard["compile_outputs"].rules[1].delete_objects_transition.condition.max_age == 90 * 86400
+    error_message = "The compile outputs retention must be configurable."
   }
 
   assert {
@@ -211,6 +267,16 @@ run "rejects_lock_longer_than_retention" {
   }
 
   expect_failures = [cloudflare_r2_bucket_lifecycle.backups]
+}
+
+run "rejects_bad_texlive_index_key" {
+  command = plan
+
+  variables {
+    texlive_index_key = "packages.json"
+  }
+
+  expect_failures = [var.texlive_index_key]
 }
 
 run "fails_without_r2_permission_group" {

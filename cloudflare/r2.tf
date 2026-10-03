@@ -1,12 +1,15 @@
 # Buckets R2 : fichiers des projets et sorties de compilation (privés, URL présignées par l'API),
-# galerie de templates (publique, en lecture seule sur templates.<domaine>), sauvegardes
-# PostgreSQL (privées, verrouillées puis expirées). Les URL r2.dev sont désactivées partout.
+# galerie de templates (publique, en lecture seule sur templates.<domaine>, un seul rédacteur :
+# la CI de kaxolax-templates), index des packages TeX Live (privé, lu par l'API, écrit par la CI
+# de kaxolax-texlive-images), sauvegardes PostgreSQL (privées, verrouillées puis expirées). Les
+# URL r2.dev sont désactivées partout.
 
 locals {
   buckets = {
     project_files   = var.bucket_names.project_files
     compile_outputs = var.bucket_names.compile_outputs
     templates       = var.bucket_names.templates
+    texlive_index   = var.bucket_names.texlive_index
     backups         = var.bucket_names.backups
   }
 
@@ -89,6 +92,8 @@ resource "cloudflare_r2_bucket_cors" "compile_outputs" {
   }]
 }
 
+# Galerie : miniatures et catalogue lus par l'application, aperçu PDF lu par pdf.js par plages
+# (Range) ; sans les en-têtes exposés, pdf.js renonce aux plages et télécharge tout le fichier.
 resource "cloudflare_r2_bucket_cors" "templates" {
   account_id   = var.account_id
   bucket_name  = cloudflare_r2_bucket.main["templates"].name
@@ -98,7 +103,9 @@ resource "cloudflare_r2_bucket_cors" "templates" {
     allowed = {
       origins = [local.app_origin, local.admin_origin]
       methods = ["GET", "HEAD"]
+      headers = ["range"]
     }
+    expose_headers  = ["Accept-Ranges", "Content-Length", "Content-Range", "ETag"]
     max_age_seconds = 3600
   }]
 }
@@ -147,22 +154,39 @@ resource "cloudflare_r2_bucket_lock" "backups" {
   }]
 }
 
-resource "cloudflare_r2_bucket_lifecycle" "standard" {
-  for_each = toset(["project_files", "compile_outputs", "templates"])
-
-  account_id   = var.account_id
-  bucket_name  = cloudflare_r2_bucket.main[each.key].name
-  jurisdiction = var.r2_jurisdiction
-
-  rules = concat(
-    [local.abort_multipart_rule],
-    each.key == "compile_outputs" && var.compile_outputs_retention_days != null ? [{
+# Fichiers des projets (téléversements en attente), sorties de compilation (données des
+# utilisateurs : sources envoyées au Worker, PDF), galerie et index TeX Live (sans expiration :
+# republiés en entier par leur CI). Mêmes règles qu'en local
+# (docker/s3-init/init-buckets.sh de kaxolax-platform).
+locals {
+  standard_lifecycle_rules = {
+    project_files = [{
+      id         = "expire-pending-uploads"
+      enabled    = true
+      conditions = { prefix = "uploads/" }
+      delete_objects_transition = {
+        condition = { type = "Age", max_age = var.pending_uploads_retention_days * 86400 }
+      }
+    }]
+    compile_outputs = [{
       id         = "expire-compile-outputs"
       enabled    = true
       conditions = { prefix = "" }
       delete_objects_transition = {
         condition = { type = "Age", max_age = var.compile_outputs_retention_days * 86400 }
       }
-    }] : [],
-  )
+    }]
+    templates     = []
+    texlive_index = []
+  }
+}
+
+resource "cloudflare_r2_bucket_lifecycle" "standard" {
+  for_each = local.standard_lifecycle_rules
+
+  account_id   = var.account_id
+  bucket_name  = cloudflare_r2_bucket.main[each.key].name
+  jurisdiction = var.r2_jurisdiction
+
+  rules = concat([local.abort_multipart_rule], each.value)
 }

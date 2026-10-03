@@ -22,6 +22,9 @@ extra_dns_records = [
 # Passer à "strict" une fois les certificats des domaines émis par Railway.
 ssl_mode = "full"
 
-# admin_allowed_countries = ["FR"]
-# backup_retention_days   = 45
-# backup_lock_days        = 7
+# admin_allowed_countries        = ["FR"]
+# backup_retention_days          = 45
+# backup_lock_days               = 7
+# compile_outputs_retention_days = 7 # sorties de compilation (sources, PDF)
+# pending_uploads_retention_days = 1 # téléversements jamais confirmés (uploads/)
+# texlive_index_key              = "texlive/2026/packages.json"

@@ -20,13 +20,13 @@ navigateur ──HTTPS/WSS──▶│ DNS (DNSSEC) · CDN · WAF · limitation 
                          │                    Container (VM isolée, sans réseau)         │
                          └──────────────────────────┼────────────────────────────────────┘
                                                     │ rappel signé (HMAC) → api
-┌──────────────────────── Railway (réseau privé) ───┼──────────────────────────────────┐
+┌──────────────────────── Railway (réseau privé) ───┼───────────────────────────────────┐
 │ web (Next.js) ──┐                                 ▼                                   │
-│ admin (Next.js) ┼─▶ api (AdonisJS) ──▶ realtime (Hocuspocus) ── événements de build   │
-│                 │        │                     │                                     │
-│                 │        ├──▶ PostgreSQL ◀─────┘          backup (cron) ──▶ R2 backups │
-│                 │        └──▶ Redis ◀──── realtime (extension Redis, plusieurs instances)│
-└─────────────────────────────────────────────────────────────────────────────────────┘
+│ admin (Next.js) ┼─▶ api (AdonisJS) ──▶ realtime ×2 (Hocuspocus) : événements de build │
+│                 │        │                     │        │                             │
+│                 │        └──▶ PostgreSQL ◀─────┘        └──▶ Redis (entre instances)  │
+│                 │                      backup (cron) ──▶ R2 kaxolax-backups           │
+└───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Réseau et sécurité
@@ -36,17 +36,29 @@ navigateur ──HTTPS/WSS──▶│ DNS (DNSSEC) · CDN · WAF · limitation 
 - **TLS** : TLS 1.2 minimum, TLS 1.3, HTTPS forcé, HSTS six mois (sous-domaines compris, sans
   preload). Entre Cloudflare et Railway : mode `full` le temps de l'émission des certificats par
   Railway, puis `strict`. Le mode `flexible` (HTTP vers l'origine) est refusé par la validation.
-- **WAF** (règles personnalisées, plan Free compris) : blocage public des routes `/internal/*`
-  (le service temps réel ne les sert qu'au réseau privé), méthodes HTTP inconnues refusées sur
-  l'API, seule la connexion WebSocket (GET) publique sur `realtime`, filtre par pays optionnel sur
-  `admin`. Le « Cloudflare Free Managed Ruleset » s'applique d'office.
+- **WAF** (règles personnalisées, plan Free compris) : blocage public des routes `/internal/*`,
+  méthodes HTTP inconnues refusées sur l'API, seule la connexion WebSocket (GET) publique sur
+  `realtime`, filtre par pays optionnel sur `admin`. Le « Cloudflare Free Managed Ruleset »
+  s'applique d'office. Le service temps réel sert ses routes `/internal/*` sur son port public
+  (le même que les WebSocket, derrière `realtime.<domaine>`) : elles sont protégées par cette
+  règle WAF puis, à chaque requête, par le jeton interne (`X-Internal-Token`, secret
+  `INTERNAL_TOKEN` partagé avec l'API ; 401 sans lui). L'API les appelle par le réseau privé.
 - **Limitation de débit** : 100 requêtes par 10 s et par IP sur `/api/*`, hors webhooks Clerk
   (`/api/v1/webhooks/*`) et rappels du Worker (`/api/v1/internal/*`). Le plan Pro permet une
   seconde règle (compilation).
+- **Origine non authentifiée** : Railway ne réserve pas ses domaines personnalisés à Cloudflare.
+  Une connexion directe à l'edge de Railway (`curl --resolve api.<domaine>:443:<IP de l'edge>`)
+  échappe au WAF et à la limitation de débit, et fait accepter des en-têtes `X-Forwarded-For`,
+  `-Proto` et `-Host` choisis (`TRUSTED_PROXY_HOPS=2` de l'API ne les rend pas sûrs). Les routes
+  sensibles ont leur propre protection (jetons Clerk, `X-Internal-Token`, HMAC des rappels) ;
+  aucune règle ne repose sur l'IP. Si une règle doit un jour s'y fier : en-tête secret ajouté par
+  une Transform Rule de Cloudflare (Terraform), vérifié par l'API, puis `CF-Connecting-IP` seul.
 - **Réseau privé de Railway** : web et admin appellent l'API par `api.railway.internal:3333`
   (réécriture `/api` de Next.js), l'API appelle realtime par `realtime.railway.internal:1234`.
-  PostgreSQL et Redis n'ont pas de domaine public. Les services écoutent sur `::` (réseau privé
-  IPv6 de Railway).
+  PostgreSQL et Redis n'ont pas de domaine public ; Redis ne sert qu'aux deux instances de
+  realtime (extension Redis de Hocuspocus, bus entre instances), l'API ne l'utilise pas. Les
+  services écoutent sur `::` (réseau privé IPv6 de Railway) ; ports : web 3000, admin 3001,
+  api 3333, realtime 1234.
 - **Accès administrateur** : Clerk (rôle `admin` et MFA, décision C.5) ; le filtre par pays de
   Cloudflare est une défense en profondeur.
 
@@ -54,17 +66,28 @@ navigateur ──HTTPS/WSS──▶│ DNS (DNSSEC) · CDN · WAF · limitation 
 
 | Bucket                    | Accès                                                   | Règles                                    |
 | ------------------------- | ------------------------------------------------------- | ----------------------------------------- |
-| `kaxolax-project-files`   | privé ; API (jeton `app`), Worker (binding)             | CORS app (GET, PUT), multipart purgé à 1 j |
-| `kaxolax-compile-outputs` | privé ; Worker (binding, écriture), API (URL présignées) | CORS app (GET, Range), expiration optionnelle |
-| `kaxolax-templates`       | public sur `templates.<domaine>` ; CI de kaxolax-templates | lecture seule pour le public, CORS app/admin |
+| `kaxolax-project-files`   | privé ; API (jeton `app`), Worker (binding)             | CORS app (GET, PUT), `uploads/` expirés à 1 j, multipart purgé à 1 j |
+| `kaxolax-compile-outputs` | privé ; Worker (binding, écriture), API (jeton `app`, URL présignées) | CORS app (GET, Range), expiration à 7 j |
+| `kaxolax-templates`       | public sur `templates.<domaine>` ; seul rédacteur : CI de kaxolax-templates (jeton `templates_publish`) ; API par HTTPS | lecture seule pour le public, CORS app/admin (GET, Range) |
+| `kaxolax-texlive-index`   | privé ; CI de kaxolax-texlive-images (jeton `texlive_publish`, `texlive/`), API (jeton `app`, lecture) | ni domaine public ni expiration |
 | `kaxolax-backups`         | privé ; service `backup` (jeton `backup`), test de restauration (jeton `backup_read`, lecture) | verrou 7 j, expiration 45 j |
 
 - Juridiction **UE** par défaut (données stockées dans l'Union européenne) ; endpoint S3
   `https://<compte>.eu.r2.cloudflarestorage.com`, avec le SDK S3 existant (`S3_REGION=auto`).
 - URL `r2.dev` désactivées sur tous les buckets.
+- **Confidentialité** : les sorties de compilation (PDF, journaux, et les demandes, qui
+  contiennent les sources) expirent après 7 jours (`compile_outputs_retention_days`), les
+  téléversements jamais confirmés après 1 jour (`pending_uploads_retention_days`), comme en
+  local. La suppression définitive d'un projet efface aussi `projects/<id>/` et
+  `outputs/<id>/` (API).
 - **Jetons** : un jeton de compte par usage, groupe « Workers R2 Storage Bucket Item Write »
-  limité aux buckets concernés (aucun droit de gestion des buckets ni de la zone). Restriction par
-  IP possible (`token_allowed_cidrs`) avec les IP de sortie statiques de Railway.
+  (ou « Item Read ») limité aux buckets concernés, aucun droit de gestion des buckets ni de la
+  zone : `app` (écriture sur les fichiers et les sorties, lecture sur l'index TeX Live),
+  `backup`, `backup_read` (lecture), `templates_publish` (galerie), `texlive_publish` (index).
+  R2 ne restreint pas un jeton à un préfixe : un bucket par rédacteur, pour que seule la CI de
+  kaxolax-templates puisse écrire la galerie publique (catalogue, zip importés, contenu de
+  `templates.<domaine>`).
+  Restriction par IP possible (`token_allowed_cidrs`) avec les IP de sortie statiques de Railway.
 
 ## Compilation asynchrone
 
@@ -95,11 +118,18 @@ navigateur ──HTTPS/WSS──▶│ DNS (DNSSEC) · CDN · WAF · limitation 
 | aucun réseau (`--network none`)                  | aucun réseau (`enableInternet = false`)                     |
 | fichiers montés depuis le worker                 | fichiers passés par le Worker (binding R2), pas d'identifiants dans la VM |
 
-Restent identiques : `latexmk -norc`, `texmf.cnf` durci (pas de shell escape, `openout_any = p`),
-utilisateur non privilégié, limites de temps et de mémoire, processus tués après chaque
-compilation. Le risque résiduel est qu'une compilation malveillante lise les fichiers temporaires
-d'une compilation précédente **du même projet** pendant la session : acceptable, ces fichiers
-appartiennent déjà aux membres du projet.
+Gardé : `latexmk -norc`, `texmf.cnf` durci (pas de shell escape, `openout_any = p`), utilisateur
+non privilégié (UID 1000, `setpriv`), `prlimit` (taille de fichier, nombre de processus), délai
+maximal par compilation, processus tués et `/tmp` vidé après chaque compilation.
+
+Perdu par rapport à l'étape 1 (écart à valider avant la mise en production, voir
+`docs/decisions.md` de kaxolax-platform) :
+
+- **limites mémoire et CPU par compilation** : plus de cgroup par conteneur ; seules celles de la
+  VM du projet s'appliquent (`instance_type`), et `oom_score_adj` protège l'agent ;
+- **isolation entre deux compilations d'un même projet** : la VM est réutilisée pendant la
+  session ; une compilation malveillante peut lire les fichiers temporaires d'une compilation
+  précédente du même projet, qui appartiennent déjà à ses membres.
 
 ## Données et sauvegardes
 
@@ -123,4 +153,5 @@ appartiennent déjà aux membres du projet.
 
 - Code du Worker et du conteneur de compilation, `wrangler.jsonc` (bindings R2, domaine
   `compile.<domaine>`), Dockerfile des services : kaxolax-platform.
-- Publication de la galerie : CI de kaxolax-templates (jeton `templates_publish`).
+- Publication de la galerie : CI de kaxolax-templates (jeton `templates_publish`) ; index des
+  packages TeX Live : CI de kaxolax-texlive-images (jeton `texlive_publish`).
